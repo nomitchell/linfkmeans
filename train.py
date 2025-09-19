@@ -80,7 +80,8 @@ class Algorithm2Trainer:
         robust_correct = 0
         total_samples = 0
         
-        progress_bar = tqdm(self.train_loader, desc=f'Epoch {epoch}', ncols=150)
+        progress_bar = tqdm(self.train_loader, desc=f'Epoch {epoch}', 
+                           leave=True, dynamic_ncols=True, mininterval=0.5)
         
         for batch_idx, (x_clean, y) in enumerate(progress_bar):
             x_clean, y = x_clean.to(self.device), y.to(self.device)
@@ -180,29 +181,31 @@ class Algorithm2Trainer:
                 'Robust': f'{robust_acc_running:.1f}%'
             })
             
-            # Build multi-row description for detailed metrics
-            if batch_idx % 5 == 0:  # Update detailed display every 5 batches for speed
+            # Update detailed metrics less frequently to avoid spam
+            if batch_idx % 20 == 0:  # Update every 20 batches instead of 5
                 # Compute Algorithm 2 specific metrics
                 alg2_metrics = self._compute_algorithm2_metrics(network_results, x_clean, x_adv, y)
                 
-                # Build Algorithm 2 metrics string
-                alg2_str = f'A2:  LR={self.optimizer.param_groups[0]["lr"]:.1e}'
-                if 'quant_acc' in alg2_metrics:
-                    alg2_str += f' QAcc={alg2_metrics["quant_acc"]:.1f}%'
-                if 'avg_dist' in alg2_metrics:
-                    alg2_str += f' QDist={alg2_metrics["avg_dist"]:.3f}'
-                if 'lip_viol' in alg2_metrics:
-                    alg2_str += f' LipViol={alg2_metrics["lip_viol"]:.1f}%'
-                if 'lip_avg' in alg2_metrics:
-                    alg2_str += f' LipRatio={alg2_metrics["lip_avg"]:.2f}'
+                # Build compact single-line description
+                lr_str = f'LR={self.optimizer.param_groups[0]["lr"]:.1e}'
+                loss_str = f'cls={avg_cls_loss:.2f} ctr={avg_center_cls_loss:.2f} lip={avg_lipschitz_loss:.3f} km={avg_kmeans_loss:.1f}'
                 
-                desc_lines = [
-                    f'Epoch {epoch}',
-                    f'Raw: cls={avg_cls_loss:.3f} ctr={avg_center_cls_loss:.3f} lip={avg_lipschitz_loss:.3f} km={avg_kmeans_loss:.3f}',
-                    f'Scl: λ₁={scaled_cls:.3f} λ₂={scaled_center:.3f} λ₃={scaled_lip:.3f} λ₄={scaled_kmeans:.3f}',
-                    alg2_str
-                ]
-                progress_bar.set_description('\n'.join(desc_lines))
+                quant_str = ''
+                if 'quant_acc' in alg2_metrics and 'avg_dist' in alg2_metrics:
+                    dist_val = alg2_metrics["avg_dist"]
+                    if dist_val == float('inf') or dist_val > 999:
+                        dist_str = 'inf'
+                    else:
+                        dist_str = f'{dist_val:.2f}'
+                    quant_str = f' QAcc={alg2_metrics["quant_acc"]:.0f}% QDist={dist_str}'
+                
+                lip_str = ''
+                if 'lip_avg' in alg2_metrics:
+                    lip_str = f' LipRatio={alg2_metrics["lip_avg"]:.2f}'
+                
+                # Single line description that fits in terminal
+                desc = f'E{epoch} {lr_str} | {loss_str}{quant_str}{lip_str}'
+                progress_bar.set_description(desc)
         
         # Compute epoch metrics
         num_batches = len(self.train_loader)
@@ -448,10 +451,16 @@ class Algorithm2Trainer:
                         quant_acc = (class_pred == y).float().mean().item() * 100
                         metrics['quant_acc'] = quant_acc
                     
-                    # Average quantization distance
+                    # Average quantization distance (only for clean examples)
                     if 'distances' in quant_info:
-                        avg_quant_dist = quant_info['distances'][:len(y)].mean().item()
-                        metrics['avg_dist'] = avg_quant_dist
+                        clean_distances = quant_info['distances'][:len(y)]  # Only clean examples
+                        # Filter out any invalid values
+                        valid_distances = clean_distances[torch.isfinite(clean_distances)]
+                        if len(valid_distances) > 0:
+                            avg_quant_dist = valid_distances.mean().item()
+                            metrics['avg_dist'] = avg_quant_dist
+                        else:
+                            metrics['avg_dist'] = float('inf')
         
         # Lipschitz constraint violations (if adversarial training enabled)
         if x_adv is not None and 'latent_features' in network_results:
