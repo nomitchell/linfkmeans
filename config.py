@@ -16,17 +16,17 @@ class Config:
     quantization_split = 'layer3'  # Where to split ResNet18: 'layer1', 'layer2', 'layer3', 'layer4'
     
     # Algorithm 2 hyperparameters
-    epsilon = 8/255  # Perturbation budget
+    epsilon = 4/255  # Perturbation budget
     lipschitz_constant = 1.0  # L in the paper
     clusters_per_class = 10  # κ in the paper
     gamma = None  # Between-class margin, computed as 2*(alpha + L*epsilon)
-    alpha = 0.1  # Cluster radius
+    alpha = 0.2  # Cluster radius
     
     # Loss coefficients (λ in the paper)
     lambda_cls = 1.0      # λ1: Classification loss weight
-    lambda_c_cls = 1.0    # λ2: Center classification loss weight  
-    lambda_lip = 0.1      # λ3: Lipschitz constraint loss weight
-    lambda_kmeans = 0.1   # λ4: K-means loss weight
+    lambda_c_cls = 0.1    # λ2: Center classification loss weight  
+    lambda_lip = 0.01      # λ3: Lipschitz constraint loss weight
+    lambda_kmeans = 0.01   # λ4: K-means loss weight
     
     # Training parameters
     learning_rate = 0.1  # Higher initial LR for scheduling
@@ -59,7 +59,7 @@ class Config:
     eval_attack_restarts = 5
     
     # PERFORMANCE OPTIMIZATIONS
-    use_mixed_precision = True  # Enable AMP for ~2x speedup
+    use_mixed_precision = False  # Enable AMP for ~2x speedup
     gradient_accumulation_steps = 1  # Increase effective batch size
     pin_memory = True  # Faster data loading
     persistent_workers = True  # Keep data workers alive between epochs

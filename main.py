@@ -48,7 +48,7 @@ def parse_arguments():
                         help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=128,
                         help='Batch size')
-    parser.add_argument('--learning_rate', type=float, default=0.1,
+    parser.add_argument('--learning_rate', type=float, default=0.01,
                         help='Learning rate')
     
     # Learning rate scheduler parameters
