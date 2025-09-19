@@ -25,7 +25,7 @@ def parse_arguments():
     
     # Model configuration
     parser.add_argument('--quantization_split', choices=['layer1', 'layer2', 'layer3', 'layer4'], 
-                        default='layer3', help='Where to split ResNet18 for quantization')
+                        default='layer1', help='Where to split ResNet18 for quantization')
     parser.add_argument('--clusters_per_class', type=int, default=10,
                         help='Number of clusters per class')
     parser.add_argument('--epsilon', type=float, default=8/255,
@@ -64,9 +64,9 @@ def parse_arguments():
                         help='Classification loss weight')
     parser.add_argument('--lambda_c_cls', type=float, default=1.0,
                         help='Center classification loss weight')
-    parser.add_argument('--lambda_lip', type=float, default=0.001,
+    parser.add_argument('--lambda_lip', type=float, default=0.0001,
                         help='Lipschitz constraint loss weight')
-    parser.add_argument('--lambda_kmeans', type=float, default=0.001,
+    parser.add_argument('--lambda_kmeans', type=float, default=0.0001,
                         help='K-means loss weight')
     
     # File paths
