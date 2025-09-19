@@ -24,15 +24,16 @@ class Config:
     
     # Loss coefficients (λ in the paper)
     lambda_cls = 1.0      # λ1: Classification loss weight
-    lambda_c_cls = 0.1    # λ2: Center classification loss weight  
-    lambda_lip = 0.01      # λ3: Lipschitz constraint loss weight
-    lambda_kmeans = 0.01   # λ4: K-means loss weight
+    lambda_c_cls = 1.0   # λ2: Center classification loss weight  
+    lambda_lip = 0.001      # λ3: Lipschitz constraint loss weight
+    lambda_kmeans = 0.001   # λ4: K-means loss weight
     
     # Training parameters
-    learning_rate = 0.1  # Higher initial LR for scheduling
+    learning_rate = 0.01  # Higher initial LR for scheduling
     momentum = 0.9
     weight_decay = 5e-4
     num_epochs = 100
+    warmup_epochs = 5      # Number of epochs for learning rate warmup
     
     # Learning rate scheduling
     use_scheduler = True

@@ -2,16 +2,35 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR, StepLR
+from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR, MultiStepLR, StepLR
 from torch.cuda.amp import autocast, GradScaler  # OPTIMIZED: Mixed precision training
 from tqdm import tqdm
 import copy
+import math
 from typing import Dict, List, Tuple, Optional
 
 from utils import (
     pgd_attack, compute_accuracy, compute_lipschitz_loss, 
     compute_kmeans_loss, MetricsTracker
 )
+
+class WarmupCosineAnnealingLR(LambdaLR):
+    """
+    Learning rate scheduler with a linear warmup followed by a cosine annealing schedule.
+    """
+    def __init__(self, optimizer, warmup_epochs, max_epochs, last_epoch=-1):
+        self.warmup_epochs = warmup_epochs
+        self.max_epochs = max_epochs
+        
+        def lr_lambda(current_epoch):
+            if current_epoch < self.warmup_epochs:
+                return float(current_epoch) / float(max(1, self.warmup_epochs))
+            
+            progress = float(current_epoch - self.warmup_epochs) / float(max(1, self.max_epochs - self.warmup_epochs))
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        super().__init__(optimizer, lr_lambda, last_epoch)
+
 
 class Algorithm2Trainer:
     """Trainer implementing Algorithm 2 from the paper"""
@@ -34,8 +53,11 @@ class Algorithm2Trainer:
         # Initialize learning rate scheduler
         if config.use_scheduler:
             if config.scheduler_type == 'cosine':
-                t_max = config.scheduler_t_max if config.scheduler_t_max else config.num_epochs
-                self.scheduler = CosineAnnealingLR(self.optimizer, T_max=t_max)
+                self.scheduler = WarmupCosineAnnealingLR(
+                    self.optimizer,
+                    warmup_epochs=config.warmup_epochs,
+                    max_epochs=config.num_epochs
+                )
             elif config.scheduler_type == 'multistep':
                 self.scheduler = MultiStepLR(
                     self.optimizer, 
@@ -496,55 +518,51 @@ class Algorithm2Trainer:
         clean_correct = 0
         robust_correct = 0
         total_samples = 0
-        clean_loss = 0.0
-        robust_loss = 0.0
+        clean_loss_sum = 0.0
+        robust_loss_sum = 0.0
         
+        # Perform clean evaluation
         with torch.no_grad():
-            for x, y in tqdm(self.val_loader, desc='Validating', leave=False):
+            for x, y in tqdm(self.val_loader, desc='Validating (Clean)', leave=False, dynamic_ncols=True):
                 x, y = x.to(self.device), y.to(self.device)
                 
-                # Clean evaluation
                 clean_outputs = self.model(x)
-                clean_loss += self.criterion(clean_outputs, y).item()
+                clean_loss_sum += self.criterion(clean_outputs, y).item() * y.size(0)
                 clean_correct += (clean_outputs.argmax(1) == y).sum().item()
-                
-                # Robust evaluation
-                if self.config.use_adversarial_training:
-                    # FIXED: Store model state and ensure proper gradient setup
-                    model_training_state = self.model.training
-                    try:
-                        x_adv = pgd_attack(
-                            self.model, x, y,
-                            epsilon=self.config.epsilon,
-                            step_size=self.config.attack_step_size,
-                            num_steps=self.config.eval_attack_steps,
-                            random_start=True
-                        )
-                        # Restore model to eval mode after attack
-                        self.model.eval()
-                        robust_outputs = self.model(x_adv)
-                        robust_loss += self.criterion(robust_outputs, y).item()
-                        robust_correct += (robust_outputs.argmax(1) == y).sum().item()
-                    finally:
-                        # Ensure model state is properly restored
-                        if model_training_state:
-                            self.model.train()
-                        else:
-                            self.model.eval()
-                else:
-                    # When adversarial training is disabled, robust metrics = clean metrics
-                    robust_loss += self.criterion(clean_outputs, y).item()
-                    robust_correct += (clean_outputs.argmax(1) == y).sum().item()
-                
                 total_samples += y.size(0)
-        
-        # Compute metrics
+
+        # Perform robust evaluation if enabled
+        if self.config.use_adversarial_training:
+            for x, y in tqdm(self.val_loader, desc='Validating (Robust)', leave=False, dynamic_ncols=True):
+                x, y = x.to(self.device), y.to(self.device)
+                
+                # Enable gradients ONLY for the attack generation
+                with torch.enable_grad():
+                    x_adv = pgd_attack(
+                        self.model, x, y,
+                        epsilon=self.config.epsilon,
+                        step_size=self.config.attack_step_size,
+                        num_steps=self.config.eval_attack_steps,
+                        random_start=True
+                    )
+                
+                # Disable gradients for the forward pass
+                with torch.no_grad():
+                    robust_outputs = self.model(x_adv)
+                    robust_loss_sum += self.criterion(robust_outputs, y).item() * y.size(0)
+                    robust_correct += (robust_outputs.argmax(1) == y).sum().item()
+        else:
+            # If not using adversarial training, robust metrics are the same as clean
+            robust_correct = clean_correct
+            robust_loss_sum = clean_loss_sum
+
+        # Compute final metrics
         clean_acc = 100.0 * clean_correct / total_samples
         robust_acc = 100.0 * robust_correct / total_samples
-        clean_loss = clean_loss / len(self.val_loader)
-        robust_loss = robust_loss / len(self.val_loader)
+        clean_loss = clean_loss_sum / total_samples
+        robust_loss = robust_loss_sum / total_samples
         
-        # Check if this is the best model
+        # Check if this is the best model based on clean accuracy
         is_best = clean_acc > self.best_val_acc
         if is_best:
             self.best_val_acc = clean_acc
@@ -556,6 +574,9 @@ class Algorithm2Trainer:
             'robust_loss': robust_loss,
             'is_best': is_best
         }
+        
+        # Set model back to training mode
+        self.model.train()
         
         return val_metrics
     
