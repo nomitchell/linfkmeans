@@ -13,19 +13,19 @@ class Config:
     num_classes = 10
     
     # Model parameters
-    quantization_split = 'layer1'  # Where to split ResNet18: 'layer1', 'layer2', 'layer3', 'layer4'
+    quantization_split = 'layer3'  # Where to split ResNet18: 'layer1', 'layer2', 'layer3', 'layer4'
     
     # Algorithm 2 hyperparameters
     epsilon = 4/255  # Perturbation budget
     lipschitz_constant = 1.0  # L in the paper
     clusters_per_class = 10  # κ in the paper
     gamma = None  # Between-class margin, computed as 2*(alpha + L*epsilon)
-    alpha = 0.2  # Cluster radius
+    alpha = 0.1  # Cluster radius
     
     # Loss coefficients (λ in the paper)
     lambda_cls = 1.0      # λ1: Classification loss weight
     lambda_c_cls = 1.0   # λ2: Center classification loss weight  
-    lambda_lip = 0.0001      # λ3: Lipschitz constraint loss weight
+    lambda_lip = 0.0000      # λ3: Lipschitz constraint loss weight
     lambda_kmeans = 0.0001   # λ4: K-means loss weight
     
     # Training parameters
@@ -33,7 +33,7 @@ class Config:
     momentum = 0.9
     weight_decay = 5e-4
     num_epochs = 100
-    warmup_epochs = 5      # Number of epochs for learning rate warmup
+    warmup_epochs = 1      # Number of epochs for learning rate warmup
     
     # Learning rate scheduling
     use_scheduler = True

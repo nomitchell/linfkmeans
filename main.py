@@ -64,7 +64,7 @@ def parse_arguments():
                         help='Classification loss weight')
     parser.add_argument('--lambda_c_cls', type=float, default=1.0,
                         help='Center classification loss weight')
-    parser.add_argument('--lambda_lip', type=float, default=0.0001,
+    parser.add_argument('--lambda_lip', type=float, default=0.0000,
                         help='Lipschitz constraint loss weight')
     parser.add_argument('--lambda_kmeans', type=float, default=0.0001,
                         help='K-means loss weight')
