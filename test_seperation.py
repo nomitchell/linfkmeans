@@ -363,7 +363,8 @@ def plot_latent_space(features_by_class, filename="latent_space_tsne.png"):
     all_labels = np.array(all_labels)
 
     # Perform t-SNE
-    tsne = TSNE(n_components=2, perplexity=30, n_iter=1000, random_state=42, init='pca', learning_rate='auto')
+    # Note: 'n_iter' was deprecated in scikit-learn 1.2 and removed in 1.4. Replaced with 'max_iter'.
+    tsne = TSNE(n_components=2, perplexity=30, max_iter=1000, random_state=42, init='pca', learning_rate='auto')
     
     print(f"  Running t-SNE on {len(all_features)} points... (this may take a few minutes)")
     features_2d = tsne.fit_transform(all_features)
