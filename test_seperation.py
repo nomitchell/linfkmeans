@@ -98,6 +98,29 @@ class DecomposedResNet18(nn.Module):
 # 2. SELF-CONTAINED ADVERSARIAL TRAINING UTILITIES
 # ==============================================================================
 
+def compute_lipschitz_loss(phi_clean, phi_adv, x_clean, x_adv, lipschitz_constant):
+    """
+    Computes the local Lipschitz loss based on the formula in paper.txt.
+    Loss = relu(||g_phi(x) - g_phi(x')||_2 / ||x - x'||_inf - L)
+    """
+    # Flatten phi to calculate L2 norm on feature vectors
+    phi_clean_flat = phi_clean.view(phi_clean.size(0), -1)
+    phi_adv_flat = phi_adv.view(phi_adv.size(0), -1)
+    phi_diff = torch.norm(phi_clean_flat - phi_adv_flat, p=2, dim=1)
+
+    # Flatten x to calculate L-inf norm on input vectors ([0,1] image space)
+    x_clean_flat = x_clean.view(x_clean.size(0), -1)
+    x_adv_flat = x_adv.view(x_adv.size(0), -1)
+    x_diff = torch.norm(x_clean_flat - x_adv_flat, p=float('inf'), dim=1)
+
+    # Avoid division by zero for identical images
+    x_diff = torch.max(x_diff, torch.tensor(1e-8).to(x_diff.device))
+
+    lip_ratio = phi_diff / x_diff
+    
+    lip_loss = F.relu(lip_ratio - lipschitz_constant).mean()
+    return lip_loss
+
 def get_cifar10_dataloaders(data_path, batch_size, num_workers):
     """Returns self-contained CIFAR-10 dataloaders."""
     print("Loading CIFAR-10 data...")
@@ -172,22 +195,37 @@ def train_robust_model(model, train_loader, test_loader, device, args):
         for batch_idx, (inputs, targets) in enumerate(progress_bar):
             inputs, targets = inputs.to(device), targets.to(device)
             
-            # Generate adversarial examples
+            # Generate adversarial examples from the clean [0,1] images
             adv_inputs = pgd_attack(model, inputs, targets, device, epsilon, alpha, args.attack_steps)
             
             optimizer.zero_grad()
             
-            # Normalize before forward pass
+            # Normalize both clean and adversarial inputs for the model pass
             mu = torch.tensor([0.4914, 0.4822, 0.4465]).view(3, 1, 1).to(device)
             std = torch.tensor([0.2023, 0.1994, 0.2010]).view(3, 1, 1).to(device)
             normalized_adv = (adv_inputs - mu) / std
             
+            # --- MODIFIED LOSS CALCULATION ---
+            # Always calculate L_cls on adversarial examples
             outputs = model(normalized_adv)
-            loss = criterion(outputs, targets)
-            loss.backward()
+            total_loss = criterion(outputs, targets)
+            
+            # Optionally, add the local Lipschitz loss
+            if args.use_lipschitz_loss:
+                normalized_inputs = (inputs - mu) / std
+                phi_clean = model.get_latent_representation(normalized_inputs)
+                phi_adv = model.get_latent_representation(normalized_adv)
+                
+                # Note: lip loss uses original [0,1] images for x_diff
+                lip_loss = compute_lipschitz_loss(
+                    phi_clean, phi_adv, inputs, adv_inputs, args.lipschitz_constant
+                )
+                total_loss += args.lambda_lip * lip_loss
+            
+            total_loss.backward()
             optimizer.step()
 
-            train_loss += loss.item()
+            train_loss += total_loss.item()
             _, predicted = outputs.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
@@ -238,7 +276,14 @@ def get_latent_features(model, loader, device):
             normalized_images = (images - mu) / std
 
             latent_features = model.get_latent_representation(normalized_images)
-            latent_features_cpu = latent_features.cpu().numpy()
+            
+            # --- FIX: Flatten convolutional features for KMeans ---
+            # The output of g_phi is a 4D tensor (N, C, H, W). KMeans requires 2D (n_samples, n_features).
+            # We flatten the C, H, W dimensions into a single feature vector for each sample.
+            batch_size = latent_features.shape[0]
+            latent_features_flat = latent_features.view(batch_size, -1)
+            
+            latent_features_cpu = latent_features_flat.cpu().numpy()
             labels_cpu = labels.cpu().numpy()
             
             for i in range(len(labels_cpu)):
@@ -298,6 +343,11 @@ def main():
     parser.add_argument('--alpha', type=float, default=2.0, help='PGD attack step size (0-255).')
     parser.add_argument('--attack_steps', type=int, default=10, help='Number of PGD steps.')
 
+    # New Lipschitz loss arguments
+    parser.add_argument('--use_lipschitz_loss', action='store_true', help='Enable the local Lipschitz loss term during training.')
+    parser.add_argument('--lambda_lip', type=float, default=0.5, help='Coefficient for the Lipschitz loss.')
+    parser.add_argument('--lipschitz_constant', type=float, default=10.0, help='Target Lipschitz constant (L) for the loss.')
+
     # Analysis arguments
     parser.add_argument('--quantization_split', type=str, default='layer3', choices=['layer1', 'layer2', 'layer3', 'layer4'], help="Layer for latent space analysis.")
     parser.add_argument('--num_clusters', type=int, default=5, help='Number of clusters (k) per class for analysis.')
@@ -315,6 +365,11 @@ def main():
     np.random.seed(args.seed)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
+    
+    if args.use_lipschitz_loss:
+        print("Lipschitz loss ENABLED with lambda = {:.2f} and L = {:.2f}".format(args.lambda_lip, args.lipschitz_constant))
+    else:
+        print("Lipschitz loss DISABLED. Training with standard PGD-AT.")
 
     train_loader, test_loader = get_cifar10_dataloaders(args.data_path, args.batch_size, args.num_workers)
 
