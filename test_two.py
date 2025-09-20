@@ -308,7 +308,11 @@ def train_phase2(model, centers, val_features_by_class, optimizer, device, args)
     print(f"  Phase 2 Step - L_kmeans: {loss_kmeans.item():.2f}, L_c_cls: {loss_c_cls.item():.2f}")
 
 
-def plot_latent_space(features, labels, filename):
+def plot_latent_space(features, labels, filename_prefix, args):
+    epsilon_str = f"{args.epsilon:.3f}".replace("0.", "p")
+    filename = f"{filename_prefix}_L{args.lipschitz_constant}_eps{epsilon_str}_lip{args.lambda_lip}_margin{args.lambda_margin}.png"
+    title = f"Latent Space (L={args.lipschitz_constant}, $\\epsilon$={args.epsilon:.3f}, $\\lambda_{{lip}}$={args.lambda_lip}, $\\lambda_{{margin}}$={args.lambda_margin})"
+
     print(f"\nGenerating 2D t-SNE plot and saving to {filename}...")
     points_per_class = 500
     subset_features, subset_labels = [], []
@@ -333,7 +337,7 @@ def plot_latent_space(features, labels, filename):
     legend_elements = scatter.legend_elements()
     class_names = ['plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
     plt.legend(legend_elements[0], class_names, title="Classes")
-    plt.title(f"2D t-SNE Visualization of Latent Space ({os.path.basename(filename)})")
+    plt.title(title)
     plt.savefig(filename)
     print(f"Plot saved to {filename}")
 
@@ -380,8 +384,8 @@ def main():
         scheduler.step()
         
     print("--- Phase 1 Complete. Analyzing latent space... ---")
-    val_features, val_labels = get_latent_features(model, test_loader, device)
-    plot_latent_space(val_features, val_labels, "latent_space_phase1.png")
+    val_features, val_labels = get_latent_features(model, test_loader, device, max_batches=20) # Limit batches to reduce memory
+    plot_latent_space(val_features, val_labels, "latent_space_phase1", args)
     
     # --- PHASE 2 ---
     print("\n--- Starting Phase 2: Quantization ---")
@@ -420,6 +424,50 @@ def main():
         
     print("--- Phase 2 Complete. ---")
     # Final analysis could be done here.
+    print("\n--- Final Evaluation ---")
+    evaluate_robustness(model, test_loader, device, "Validation Set", args)
+    evaluate_robustness(model, train_loader, device, "Training Set", args)
+    
+
+def evaluate_robustness(model, loader, device, dataset_name, args):
+    model.eval()
+    total_correct_clean = 0
+    total_correct_robust = 0
+    total_samples = 0
+    
+    mu = torch.tensor([0.4914, 0.4822, 0.4465]).view(3, 1, 1).to(device)
+    std = torch.tensor([0.2023, 0.1994, 0.2010]).view(3, 1, 1).to(device)
+
+    progress_bar = tqdm(loader, desc=f"Evaluating on {dataset_name}")
+    for inputs, targets in progress_bar:
+        inputs, targets = inputs.to(device), targets.to(device)
+        
+        # Clean accuracy
+        with torch.no_grad():
+            norm_inputs = (inputs - mu) / std
+            outputs_clean = model(norm_inputs)
+            _, predicted_clean = outputs_clean.max(1)
+            total_correct_clean += predicted_clean.eq(targets).sum().item()
+        
+        # Robust accuracy
+        adv_inputs = pgd_attack(model, inputs, targets, device, args.epsilon, args.alpha, args.attack_steps)
+        with torch.no_grad():
+            norm_adv_inputs = (adv_inputs - mu) / std
+            outputs_robust = model(norm_adv_inputs)
+            _, predicted_robust = outputs_robust.max(1)
+            total_correct_robust += predicted_robust.eq(targets).sum().item()
+            
+        total_samples += targets.size(0)
+
+        clean_acc = 100. * total_correct_clean / total_samples
+        robust_acc = 100. * total_correct_robust / total_samples
+        progress_bar.set_postfix({'Clean Acc': f'{clean_acc:.2f}%', 'Robust Acc': f'{robust_acc:.2f}%'})
+
+    final_clean_acc = 100. * total_correct_clean / total_samples
+    final_robust_acc = 100. * total_correct_robust / total_samples
+    print(f"Results for {dataset_name}:")
+    print(f"  Clean Accuracy: {final_clean_acc:.2f}%")
+    print(f"  Robust Accuracy: {final_robust_acc:.2f}%")
     
 if __name__ == '__main__':
     main()
