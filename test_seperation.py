@@ -12,6 +12,12 @@ from scipy.spatial.distance import cdist
 import sys
 import os
 
+# This script requires scikit-learn, matplotlib, and tqdm.
+# You can install them with: pip install scikit-learn matplotlib tqdm
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+
+
 # ==============================================================================
 # 1. SELF-CONTAINED MODEL DEFINITION (ResNet-18)
 # ==============================================================================
@@ -329,6 +335,58 @@ def calculate_gamma(centers_by_class):
     print(f"Calculation complete. Gamma = {gamma:.4f}")
     return gamma
 
+def plot_latent_space(features_by_class, filename="latent_space_tsne.png"):
+    """
+    Performs t-SNE dimensionality reduction on a subset of the latent features 
+    and saves a 2D plot.
+    """
+    print(f"\nGenerating 2D t-SNE plot of the latent space...")
+
+    # Prepare data for t-SNE: concatenate a subset of features and create a labels array
+    all_features = []
+    all_labels = []
+    points_per_class = 500  # t-SNE is slow, so we use a subset
+
+    for label, features in features_by_class.items():
+        if len(features) > points_per_class:
+            indices = np.random.choice(len(features), points_per_class, replace=False)
+            features = features[indices]
+            
+        all_features.append(features)
+        all_labels.extend([label] * len(features))
+
+    if not all_features:
+        print("  No features to plot. Skipping t-SNE.")
+        return
+
+    all_features = np.concatenate(all_features, axis=0)
+    all_labels = np.array(all_labels)
+
+    # Perform t-SNE
+    tsne = TSNE(n_components=2, perplexity=30, n_iter=1000, random_state=42, init='pca', learning_rate='auto')
+    
+    print(f"  Running t-SNE on {len(all_features)} points... (this may take a few minutes)")
+    features_2d = tsne.fit_transform(all_features)
+    print("  t-SNE complete.")
+
+    # Create the plot
+    plt.figure(figsize=(12, 10))
+    scatter = plt.scatter(features_2d[:, 0], features_2d[:, 1], c=all_labels, cmap='tab10', alpha=0.7, s=12)
+    
+    # Create a legend
+    legend_elements = scatter.legend_elements()
+    class_names = ['plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
+    plt.legend(legend_elements[0], class_names, title="Classes")
+    
+    plt.title("2D t-SNE Visualization of the Latent Space")
+    plt.xlabel("t-SNE Component 1")
+    plt.ylabel("t-SNE Component 2")
+    plt.grid(True, linestyle='--', alpha=0.6)
+    
+    # Save the plot
+    plt.savefig(filename)
+    print(f"Plot saved to {filename}")
+
 # ==============================================================================
 # 4. MAIN EXECUTION SCRIPT
 # ==============================================================================
@@ -351,6 +409,7 @@ def main():
     # Analysis arguments
     parser.add_argument('--quantization_split', type=str, default='layer3', choices=['layer1', 'layer2', 'layer3', 'layer4'], help="Layer for latent space analysis.")
     parser.add_argument('--num_clusters', type=int, default=5, help='Number of clusters (k) per class for analysis.')
+    parser.add_argument('--plot_latent_space', action='store_true', help='Generate a 2D t-SNE plot of the latent space after analysis.')
 
     # Common arguments
     parser.add_argument('--data_path', type=str, default='./data', help='Path to CIFAR-10 data.')
@@ -418,6 +477,10 @@ def main():
         print("      This suggests the theoretical condition may be too strong or geometrically")
         print("      infeasible for this dataset and architecture.")
     print("="*50)
+
+    # --- 5. (Optional) Plot Latent Space ---
+    if args.plot_latent_space:
+        plot_latent_space(features)
 
 
 if __name__ == '__main__':
