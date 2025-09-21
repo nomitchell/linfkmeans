@@ -130,6 +130,23 @@ def compute_margin_loss(phi_clean, labels, margin):
     if different_class_dists.nelement() == 0: return torch.tensor(0.0).to(phi_clean.device)
     return F.relu(margin - different_class_dists).mean()
 
+def compute_intra_margin_loss(phi_clean, labels):
+    """Computes the average distance between points of the same class."""
+    phi_flat = phi_clean.view(phi_clean.size(0), -1)
+    pairwise_dist = torch.cdist(phi_flat, phi_flat, p=2)
+    
+    # Create a mask for pairs of the same class, excluding self-comparisons
+    n = phi_flat.size(0)
+    label_matrix = labels.view(-1, 1) == labels.view(1, -1)
+    label_matrix.fill_diagonal_(False)
+    
+    same_class_dists = pairwise_dist[label_matrix]
+    
+    if same_class_dists.nelement() == 0:
+        return torch.tensor(0.0).to(phi_clean.device)
+        
+    return same_class_dists.mean()
+
 def compute_kmeans_loss(phi, labels, centers, kmeans_gamma):
     """Computes the K-means style loss from the paper."""
     total_loss = 0.0
@@ -220,10 +237,13 @@ def train_phase1(model, loader, optimizer, device, args):
         margin = 2 * args.lipschitz_constant * args.epsilon
         loss_margin = compute_margin_loss(phi_clean, targets, margin)
         
-        total_loss = loss_cls + args.lambda_lip * loss_lip + args.lambda_margin * loss_margin
+        # 4. Intra-Margin Loss on clean examples
+        loss_intra_margin = compute_intra_margin_loss(phi_clean, targets)
+
+        total_loss = loss_cls + args.lambda_lip * loss_lip + args.lambda_margin * loss_margin + args.lambda_intra_margin * loss_intra_margin
         total_loss.backward()
         optimizer.step()
-        progress_bar.set_postfix({'L_cls': f'{loss_cls.item():.2f}', 'L_lip': f'{loss_lip.item():.2f}', 'L_margin': f'{loss_margin.item():.2f}'})
+        progress_bar.set_postfix({'L_cls': f'{loss_cls.item():.2f}', 'L_lip': f'{loss_lip.item():.2f}', 'L_margin': f'{loss_margin.item():.2f}', 'L_intra': f'{loss_intra_margin.item():.2f}'})
 
 def validate(model, loader, device, epoch, phase):
     model.eval()
@@ -241,6 +261,50 @@ def validate(model, loader, device, epoch, phase):
     print(f"Phase {phase} Epoch {epoch} Val Acc: {acc:.2f}%")
     return acc
 
+def analyze_phase1_geometry(model, loader, device, args):
+    """Analyzes and prints key geometric properties of the latent space during Phase 1."""
+    print("  Analyzing Phase 1 latent space geometry...")
+    # Use a subset of data for speed, consistent with other analyses
+    features, labels = get_latent_features(model, loader, device, max_batches=20) 
+    
+    if features.size(0) < 2:
+        print("  Not enough features to analyze geometry.")
+        return
+
+    features_flat = features.view(features.size(0), -1)
+    
+    # Compute all pairwise distances efficiently
+    pairwise_dist = torch.cdist(features_flat, features_flat, p=2)
+    
+    # Create masks to separate inter/intra-class distances
+    is_same_class = labels.view(-1, 1) == labels.view(1, -1)
+    is_same_class.fill_diagonal_(False) # Exclude distances from a point to itself
+    is_diff_class = ~is_same_class
+    is_diff_class.fill_diagonal_(False)
+
+    intra_class_dists = pairwise_dist[is_same_class]
+    inter_class_dists = pairwise_dist[is_diff_class]
+
+    if intra_class_dists.nelement() == 0 or inter_class_dists.nelement() == 0:
+        print("  Could not analyze geometry: not enough points or classes in the batch sample.")
+        return
+
+    # --- Calculate and Print Metrics ---
+    avg_intra_dist = intra_class_dists.mean().item()
+    min_intra_dist = intra_class_dists.min().item()
+    avg_inter_dist = inter_class_dists.mean().item()
+    min_inter_dist = inter_class_dists.min().item()
+
+    print(f"    Intra-class dists - Avg: {avg_intra_dist:.4f}, Min: {min_intra_dist:.4f}")
+    print(f"    Inter-class dists - Avg: {avg_inter_dist:.4f}, Min: {min_inter_dist:.4f} (gamma_proxy)")
+    
+    # --- Analyze the Robustness Condition ---
+    alpha_proxy = avg_intra_dist
+    gamma_proxy = min_inter_dist
+    required_gamma = 2 * (alpha_proxy + args.lipschitz_constant * args.epsilon)
+    
+    print(f"    Robustness Check: gamma_proxy ({gamma_proxy:.4f}) {' >=' if gamma_proxy >= required_gamma else ' < '} required_gamma ({required_gamma:.4f})")
+    
 def get_latent_features(model, loader, device, max_batches=None):
     """Extracts and flattens latent features from a loader."""
     model.eval()
@@ -341,6 +405,40 @@ def plot_latent_space(features, labels, filename_prefix, args):
     plt.savefig(filename)
     print(f"Plot saved to {filename}")
 
+def estimate_optimal_clusters(class_features, k_min=2, k_max=10):
+    """Estimates the optimal number of clusters for a given class using the elbow method on K-means inertia."""
+    if len(class_features) < k_max:
+        return -1  # Not enough points for the full range of k
+
+    k_range = range(k_min, k_max + 1)
+    inertias = []
+    
+    class_features_np = class_features.cpu().numpy()
+
+    for k in k_range:
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10).fit(class_features_np)
+        inertias.append(kmeans.inertia_)
+    
+    try:
+        if len(inertias) < 3:
+            return k_min
+
+        # Normalize inertias to prevent scaling issues when finding the elbow
+        range_inertias = np.max(inertias) - np.min(inertias)
+        if range_inertias < 1e-9:
+             return k_min
+        norm_inertias = (inertias - np.min(inertias)) / range_inertias
+        
+        diff1 = np.diff(norm_inertias, 1)
+        diff2 = np.diff(diff1, 1)
+        
+        # The elbow is the point of maximum curvature (i.e., max second derivative)
+        optimal_k = k_range[np.argmax(diff2) + 1]
+    except (ValueError, IndexError):
+        optimal_k = -1 # Indicate failure
+
+    return optimal_k
+
 # ==============================================================================
 # 4. MAIN EXECUTION SCRIPT
 # ==============================================================================
@@ -351,6 +449,7 @@ def main():
     parser.add_argument('--epochs_phase1', type=int, default=20, help='Epochs for Phase 1')
     parser.add_argument('--lambda_lip', type=float, default=0.5, help='Lambda for Lipschitz loss')
     parser.add_argument('--lambda_margin', type=float, default=0.5, help='Lambda for Margin loss')
+    parser.add_argument('--lambda_intra_margin', type=float, default=0.1, help='Lambda for Intra-Margin loss (compactness)')
     parser.add_argument('--s_prime', type=int, default=1, help='Number of adversarial examples per clean example')
     # Phase 2 Args
     parser.add_argument('--epochs_phase2', type=int, default=20, help='Epochs for Phase 2')
@@ -381,11 +480,33 @@ def main():
         args.epoch = epoch
         train_phase1(model, train_loader, optimizer, device, args)
         validate(model, test_loader, device, epoch, 1)
+        analyze_phase1_geometry(model, test_loader, device, args)
         scheduler.step()
         
     print("--- Phase 1 Complete. Analyzing latent space... ---")
     val_features, val_labels = get_latent_features(model, test_loader, device, max_batches=20) # Limit batches to reduce memory
     plot_latent_space(val_features, val_labels, "latent_space_phase1", args)
+    
+    # --- Estimate optimal number of clusters ---
+    print("\n--- Estimating optimal number of clusters per class (Elbow Method) ---")
+    features_by_class_for_est = {i: val_features[val_labels == i] for i in range(10)}
+    estimated_k_values = []
+    for i in range(10):
+        class_features = features_by_class_for_est.get(i)
+        if class_features is not None and len(class_features) > 15: # Need enough samples
+            optimal_k = estimate_optimal_clusters(class_features, k_min=2, k_max=10)
+            if optimal_k > 0:
+                print(f"  Estimated optimal k for class {i}: {optimal_k}")
+                estimated_k_values.append(optimal_k)
+            else:
+                print(f"  Could not determine optimal k for class {i}.")
+        else:
+            class_len = len(class_features) if class_features is not None else 0
+            print(f"  Not enough samples for class {i} to estimate k (have {class_len}, need >15).")
+
+    if estimated_k_values:
+        avg_k = np.mean(estimated_k_values)
+        print(f"--- Suggestion: Average optimal k is {avg_k:.2f}. Your current setting is --num_clusters={args.num_clusters}. ---")
     
     # --- PHASE 2 ---
     print("\n--- Starting Phase 2: Quantization ---")
