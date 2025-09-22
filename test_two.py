@@ -446,11 +446,11 @@ def estimate_optimal_clusters(class_features, k_min=2, k_max=10):
 def main():
     parser = argparse.ArgumentParser(description="Implementation of Option 2: Two-Stage Robust Training")
     # Phase 1 Args
-    parser.add_argument('--epochs_phase1', type=int, default=20, help='Epochs for Phase 1')
+    parser.add_argument('--epochs_phase1', type=int, default=40, help='Epochs for Phase 1')
     parser.add_argument('--lambda_lip', type=float, default=0.5, help='Lambda for Lipschitz loss')
-    parser.add_argument('--lambda_margin', type=float, default=0.5, help='Lambda for Margin loss')
-    parser.add_argument('--lambda_intra_margin', type=float, default=0.0, help='Lambda for Intra-Margin loss (compactness)')
-    parser.add_argument('--s_prime', type=int, default=5, help='Number of adversarial examples per clean example')
+    parser.add_argument('--lambda_margin', type=float, default=0.1, help='Lambda for Margin loss')
+    parser.add_argument('--lambda_intra_margin', type=float, default=0.05, help='Lambda for Intra-Margin loss (compactness)')
+    parser.add_argument('--s_prime', type=int, default=1, help='Number of adversarial examples per clean example')
     # Phase 2 Args
     parser.add_argument('--epochs_phase2', type=int, default=20, help='Epochs for Phase 2')
     parser.add_argument('--lr_phase2', type=float, default=0.01, help='Learning rate for g_theta and centers in Phase 2')
@@ -459,7 +459,7 @@ def main():
     parser.add_argument('--kmeans_gamma', type=float, default=2.0, help='Margin for inter-class center separation in L_kmeans')
     parser.add_argument('--num_clusters', type=int, default=5, help='Number of clusters per class')
     # Common Args
-    parser.add_argument('--lr', type=float, default=0.1, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--epsilon', type=float, default=8.0/255.0)
     parser.add_argument('--alpha', type=float, default=2.0/255.0)
     parser.add_argument('--attack_steps', type=int, default=10)
