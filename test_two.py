@@ -465,7 +465,7 @@ def main():
     parser.add_argument('--attack_steps', type=int, default=10)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--quantization_split', type=str, default='layer3')
-    parser.add_argument('--lipschitz_constant', type=float, default=10.0)
+    parser.add_argument('--lipschitz_constant', type=float, default=1.0)
     args = parser.parse_args()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
