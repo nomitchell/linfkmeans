@@ -130,7 +130,7 @@ def compute_margin_loss(phi_clean, labels, margin):
     if different_class_dists.nelement() == 0: return torch.tensor(0.0).to(phi_clean.device)
     return F.relu(margin - different_class_dists).mean()
 
-def compute_intra_margin_loss(phi_clean, labels):
+def compute_avg_intra_class_dist(phi_clean, labels):
     """Computes the average distance between points of the same class."""
     phi_flat = phi_clean.view(phi_clean.size(0), -1)
     pairwise_dist = torch.cdist(phi_flat, phi_flat, p=2)
@@ -206,7 +206,7 @@ def compute_center_classification_loss(model, centers):
 
 def train_phase1(model, loader, optimizer, device, args):
     model.train()
-    running_loss_cls, running_loss_lip, running_loss_margin, running_loss_intra_margin = 0, 0, 0, 0
+    running_loss_cls, running_loss_lip, running_loss_margin = 0, 0, 0
 
     progress_bar = tqdm(loader, desc=f"Phase 1 Epoch {args.epoch}/{args.epochs_phase1}")
     for inputs, targets in progress_bar:
@@ -237,13 +237,13 @@ def train_phase1(model, loader, optimizer, device, args):
         loss_lip = compute_lipschitz_loss(phi_clean.repeat(args.s_prime, 1, 1, 1), phi_adv, inputs.repeat(args.s_prime, 1, 1, 1), adv_inputs, args.lipschitz_constant)
         
         # 3. Margin Loss on clean examples
-        margin = 2 * args.lipschitz_constant * args.epsilon
+        # The margin is dynamically calculated based on the robustness condition
+        with torch.no_grad():
+            avg_intra_dist = compute_avg_intra_class_dist(phi_clean, targets)
+        margin = 2 * (avg_intra_dist + args.lipschitz_constant * args.epsilon)
         loss_margin = compute_margin_loss(phi_clean, targets, margin)
         
-        # 4. Intra-Margin Loss on clean examples
-        loss_intra_margin = compute_intra_margin_loss(phi_clean, targets)
-
-        total_loss = loss_cls + args.lambda_lip * loss_lip + args.lambda_margin * loss_margin + args.lambda_intra_margin * loss_intra_margin
+        total_loss = loss_cls + args.lambda_lip * loss_lip + args.lambda_margin * loss_margin
         total_loss.backward()
         optimizer.step()
 
@@ -251,9 +251,8 @@ def train_phase1(model, loader, optimizer, device, args):
         running_loss_cls += loss_cls.item()
         running_loss_lip += (args.lambda_lip * loss_lip).item()
         running_loss_margin += (args.lambda_margin * loss_margin).item()
-        running_loss_intra_margin += (args.lambda_intra_margin * loss_intra_margin).item()
         
-        progress_bar.set_postfix({'L_cls': f'{loss_cls.item():.2f}', 'L_lip': f'{loss_lip.item():.2f}', 'L_margin': f'{loss_margin.item():.2f}', 'L_intra': f'{loss_intra_margin.item():.2f}'})
+        progress_bar.set_postfix({'L_cls': f'{loss_cls.item():.2f}', 'L_lip': f'{loss_lip.item():.2f}', 'L_margin': f'{loss_margin.item():.2f}'})
 
 def evaluate_on_train_set(model, loader, device, args, epoch, phase, max_batches=100):
     """Evaluates clean and robust accuracy on a subset of the training data."""
@@ -554,8 +553,6 @@ def main():
     parser.add_argument('--lambda_lip', type=float, default=0.01, help='Lambda for Lipschitz loss')
     parser.add_argument('--lambda_margin', type=float, default=0.01, help='Lambda for Margin loss')
     
-    parser.add_argument('--lambda_intra_margin', type=float, default=0.0, help='Lambda for Intra-Margin loss (DISABLED by default)')
-    
     parser.add_argument('--s_prime', type=int, default=2, help='Number of adversarial examples per clean example')
     # Phase 2 Args
     parser.add_argument('--epochs_phase2', type=int, default=20, help='Epochs for Phase 2')
@@ -583,7 +580,7 @@ def main():
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs_phase1)
     
-    history_phase1 = {'clean_train_acc': [], 'robust_train_acc': [], 'losses': {k: [] for k in ['cls', 'lip', 'margin', 'intra_margin']}, 'alpha': [], 'gamma': [], 'required_gamma': []}
+    history_phase1 = {'clean_train_acc': [], 'robust_train_acc': [], 'losses': {k: [] for k in ['cls', 'lip', 'margin']}, 'alpha': [], 'gamma': [], 'required_gamma': []}
 
     for epoch in range(1, args.epochs_phase1 + 1):
         args.epoch = epoch
