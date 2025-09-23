@@ -206,6 +206,9 @@ def compute_center_classification_loss(model, centers):
 
 def train_phase1(model, loader, optimizer, device, args):
     model.train()
+    total_correct, total = 0, 0
+    running_loss_cls, running_loss_lip, running_loss_margin, running_loss_intra_margin = 0, 0, 0, 0
+
     progress_bar = tqdm(loader, desc=f"Phase 1 Epoch {args.epoch}/{args.epochs_phase1}")
     for inputs, targets in progress_bar:
         inputs, targets = inputs.to(device), targets.to(device)
@@ -225,7 +228,8 @@ def train_phase1(model, loader, optimizer, device, args):
         
         # --- Loss Calculation ---
         # 1. Classification Loss on adversarial examples
-        loss_cls = F.cross_entropy(model(norm_adv), adv_targets)
+        outputs_adv = model(norm_adv)
+        loss_cls = F.cross_entropy(outputs_adv, adv_targets)
         
         # 2. Lipschitz and Margin losses (need latent features)
         phi_clean = model.get_latent_representation(norm_clean)
@@ -243,7 +247,28 @@ def train_phase1(model, loader, optimizer, device, args):
         total_loss = loss_cls + args.lambda_lip * loss_lip + args.lambda_margin * loss_margin + args.lambda_intra_margin * loss_intra_margin
         total_loss.backward()
         optimizer.step()
+
+        # --- Track metrics ---
+        running_loss_cls += loss_cls.item()
+        running_loss_lip += (args.lambda_lip * loss_lip).item()
+        running_loss_margin += (args.lambda_margin * loss_margin).item()
+        running_loss_intra_margin += (args.lambda_intra_margin * loss_intra_margin).item()
+
+        _, predicted = outputs_adv.max(1)
+        total += adv_targets.size(0)
+        total_correct += predicted.eq(adv_targets).sum().item()
+        
         progress_bar.set_postfix({'L_cls': f'{loss_cls.item():.2f}', 'L_lip': f'{loss_lip.item():.2f}', 'L_margin': f'{loss_margin.item():.2f}', 'L_intra': f'{loss_intra_margin.item():.2f}'})
+
+    num_batches = len(loader)
+    avg_losses = {
+        'cls': running_loss_cls / num_batches,
+        'lip': running_loss_lip / num_batches,
+        'margin': running_loss_margin / num_batches,
+        'intra_margin': running_loss_intra_margin / num_batches
+    }
+    train_acc = 100. * total_correct / total
+    return train_acc, avg_losses
 
 def validate(model, loader, device, epoch, phase):
     model.eval()
@@ -269,7 +294,7 @@ def analyze_phase1_geometry(model, loader, device, args):
     
     if features.size(0) < 2:
         print("  Not enough features to analyze geometry.")
-        return
+        return None, None, None
 
     features_flat = features.view(features.size(0), -1)
     
@@ -287,7 +312,7 @@ def analyze_phase1_geometry(model, loader, device, args):
 
     if intra_class_dists.nelement() == 0 or inter_class_dists.nelement() == 0:
         print("  Could not analyze geometry: not enough points or classes in the batch sample.")
-        return
+        return None, None, None
 
     # --- Calculate and Print Metrics ---
     avg_intra_dist = intra_class_dists.mean().item()
@@ -304,7 +329,8 @@ def analyze_phase1_geometry(model, loader, device, args):
     required_gamma = 2 * (alpha_proxy + args.lipschitz_constant * args.epsilon)
     
     print(f"    Robustness Check: gamma_proxy ({gamma_proxy:.4f}) {' >=' if gamma_proxy >= required_gamma else ' < '} required_gamma ({required_gamma:.4f})")
-    
+    return alpha_proxy, gamma_proxy, required_gamma
+
 def get_latent_features(model, loader, device, max_batches=None):
     """Extracts and flattens latent features from a loader."""
     model.eval()
@@ -370,6 +396,12 @@ def train_phase2(model, centers, val_features_by_class, optimizer, device, args)
     optimizer.step()
     
     print(f"  Phase 2 Step - L_kmeans: {loss_kmeans.item():.2f}, L_c_cls: {loss_c_cls.item():.2f}")
+    
+    losses = {
+        'kmeans': (args.lambda_kmeans * loss_kmeans).item(),
+        'c_cls': (args.lambda_c_cls * loss_c_cls).item()
+    }
+    return losses
 
 
 def plot_latent_space(features, labels, filename_prefix, args):
@@ -405,6 +437,61 @@ def plot_latent_space(features, labels, filename_prefix, args):
     plt.savefig(filename)
     print(f"Plot saved to {filename}")
 
+def plot_training_metrics(history, phase, args):
+    """Plots training and validation accuracy, losses, and geometry metrics."""
+    epsilon_str = f"{args.epsilon:.3f}".replace("0.", "p")
+    filename_prefix = f"metrics_phase{phase}_L{args.lipschitz_constant}_eps{epsilon_str}_lip{args.lambda_lip}_margin{args.lambda_margin}"
+    
+    epochs = range(1, len(history['val_acc']) + 1)
+
+    # Plot 1: Accuracy
+    plt.figure(figsize=(10, 6))
+    if 'train_acc' in history:
+        plt.plot(epochs, history['train_acc'], 'b-o', label='Training Accuracy')
+    plt.plot(epochs, history['val_acc'], 'r-o', label='Validation Accuracy')
+    plt.title(f'Phase {phase} Accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy (%)')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f"{filename_prefix}_accuracy.png")
+    plt.close()
+
+    # Plot 2: Scaled Losses
+    plt.figure(figsize=(10, 6))
+    for loss_name, loss_values in history['losses'].items():
+        if loss_name != 'total':
+             plt.plot(epochs, loss_values, '-o', label=f'Loss {loss_name.capitalize()}')
+    plt.title(f'Phase {phase} Scaled Loss Terms')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss Value')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f"{filename_prefix}_losses.png")
+    plt.close()
+
+    # Plot 3: Geometry
+    if 'gamma' in history:
+        plt.figure(figsize=(10, 6))
+        plt.plot(epochs, history['gamma'], 'g-o', label='Gamma (min inter-class dist)')
+        if 'required_gamma' in history:
+            plt.plot(epochs, history['required_gamma'], 'r-o', label='Required Gamma (2 * (alpha + L*eps))')
+        if 'two_alpha' in history:
+            plt.plot(epochs, history['two_alpha'], 'c-o', label='2 * Alpha')
+        
+        plt.plot(epochs, history['alpha'], 'b-o', label='Alpha (avg intra-class dist)')
+        
+        plt.title(f'Phase {phase} Latent Space Geometry')
+        plt.xlabel('Epochs')
+        plt.ylabel('Distance')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(f"{filename_prefix}_geometry.png")
+        plt.close()
+
+    print(f"Phase {phase} plots saved with prefix: {filename_prefix}")
+
+ 
 def estimate_optimal_clusters(class_features, k_min=2, k_max=10):
     """Estimates the optimal number of clusters for a given class using the elbow method on K-means inertia."""
     if len(class_features) < k_max:
@@ -476,12 +563,26 @@ def main():
     print("--- Starting Phase 1: Latent Space Structuring ---")
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs_phase1)
+    
+    history_phase1 = {'train_acc': [], 'val_acc': [], 'losses': {k: [] for k in ['cls', 'lip', 'margin', 'intra_margin']}, 'alpha': [], 'gamma': [], 'required_gamma': []}
+
     for epoch in range(1, args.epochs_phase1 + 1):
         args.epoch = epoch
-        train_phase1(model, train_loader, optimizer, device, args)
-        validate(model, test_loader, device, epoch, 1)
-        analyze_phase1_geometry(model, test_loader, device, args)
+        train_acc, avg_losses = train_phase1(model, train_loader, optimizer, device, args)
+        val_acc = validate(model, test_loader, device, epoch, 1)
+        alpha_proxy, gamma_proxy, required_gamma = analyze_phase1_geometry(model, test_loader, device, args)
         scheduler.step()
+
+        # Update history
+        history_phase1['train_acc'].append(train_acc)
+        history_phase1['val_acc'].append(val_acc)
+        for k in avg_losses: history_phase1['losses'][k].append(avg_losses[k])
+        if alpha_proxy is not None:
+            history_phase1['alpha'].append(alpha_proxy)
+            history_phase1['gamma'].append(gamma_proxy)
+            history_phase1['required_gamma'].append(required_gamma)
+
+    plot_training_metrics(history_phase1, 1, args)
         
     print("--- Phase 1 Complete. Analyzing latent space... ---")
     val_features, val_labels = get_latent_features(model, test_loader, device, max_batches=20) # Limit batches to reduce memory
@@ -531,17 +632,30 @@ def main():
 
     # 4. Phase 2 Training Loop
     val_features_by_class_cpu = {i: val_features[val_labels == i] for i in range(10)}
+    history_phase2 = {'val_acc': [], 'losses': {k: [] for k in ['kmeans', 'c_cls']}, 'alpha': [], 'gamma': [], 'two_alpha': []}
+    
     for epoch in range(1, args.epochs_phase2 + 1):
         print(f"Phase 2 Epoch {epoch}/{args.epochs_phase2}")
         # Note: A full implementation would loop over the training data here.
         # We perform one step for demonstration and then track geometry.
-        train_phase2(model, centers, val_features_by_class_cpu, optimizer_p2, device, args)
+        losses = train_phase2(model, centers, val_features_by_class_cpu, optimizer_p2, device, args)
         
+        val_acc = validate(model, test_loader, device, epoch, 2)
+
         # Live tracking of alpha and gamma on validation data
         with torch.no_grad():
-            analyze_and_report_geometry(centers.cpu().data, val_features_by_class_cpu)
+            alpha, gamma = analyze_and_report_geometry(centers.cpu().data, val_features_by_class_cpu)
             
         scheduler_p2.step()
+        
+        # Update history
+        history_phase2['val_acc'].append(val_acc)
+        for k in losses: history_phase2['losses'][k].append(losses[k])
+        history_phase2['alpha'].append(alpha.item())
+        history_phase2['gamma'].append(gamma.item())
+        history_phase2['two_alpha'].append(2 * alpha.item())
+
+    plot_training_metrics(history_phase2, 2, args)
         
     print("--- Phase 2 Complete. ---")
     # Final analysis could be done here.
