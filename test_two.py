@@ -588,8 +588,8 @@ def main():
     parser.add_argument('--kmeans_gamma', type=float, default=2.0, help='Margin for inter-class center separation in L_kmeans')
     parser.add_argument('--num_clusters', type=int, default=5, help='Number of clusters per class')
     # Common Args
-    parser.add_argument('--model_arch', type=str, default='resnet18', choices=['resnet18', 'resnet34', 'resnet50'], help='Model architecture')
-    parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
+    parser.add_argument('--model_arch', type=str, default='resnet34', choices=['resnet18', 'resnet34', 'resnet50'], help='Model architecture')
+    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--epsilon', type=float, default=8.0/255.0)
     parser.add_argument('--alpha', type=float, default=2.0/255.0)
     parser.add_argument('--attack_steps', type=int, default=10)
