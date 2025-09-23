@@ -236,12 +236,14 @@ def train_phase1(model, loader, optimizer, device, args):
         
         loss_lip = compute_lipschitz_loss(phi_clean.repeat(args.s_prime, 1, 1, 1), phi_adv, inputs.repeat(args.s_prime, 1, 1, 1), adv_inputs, args.lipschitz_constant)
         
-        # 3. Margin Loss on clean examples
-        # The margin is dynamically calculated based on the robustness condition
+        # 3. Margin Loss on clean and adversarial examples with dynamic margin based on alpha
+        all_phi = torch.cat([phi_clean, phi_adv], dim=0)
+        all_labels = torch.cat([targets, adv_targets], dim=0)
         with torch.no_grad():
-            avg_intra_dist = compute_avg_intra_class_dist(phi_clean, targets)
+            # Alpha is the average intra-class distance over both clean and adversarial points
+            avg_intra_dist = compute_avg_intra_class_dist(all_phi, all_labels)
         margin = 2 * (avg_intra_dist + args.lipschitz_constant * args.epsilon)
-        loss_margin = compute_margin_loss(phi_clean, targets, margin)
+        loss_margin = compute_margin_loss(all_phi, all_labels, margin)
         
         total_loss = loss_cls + args.lambda_lip * loss_lip + args.lambda_margin * loss_margin
         total_loss.backward()
