@@ -206,7 +206,6 @@ def compute_center_classification_loss(model, centers):
 
 def train_phase1(model, loader, optimizer, device, args):
     model.train()
-    total_correct, total = 0, 0
     running_loss_cls, running_loss_lip, running_loss_margin, running_loss_intra_margin = 0, 0, 0, 0
 
     progress_bar = tqdm(loader, desc=f"Phase 1 Epoch {args.epoch}/{args.epochs_phase1}")
@@ -253,38 +252,54 @@ def train_phase1(model, loader, optimizer, device, args):
         running_loss_lip += (args.lambda_lip * loss_lip).item()
         running_loss_margin += (args.lambda_margin * loss_margin).item()
         running_loss_intra_margin += (args.lambda_intra_margin * loss_intra_margin).item()
-
-        _, predicted = outputs_adv.max(1)
-        total += adv_targets.size(0)
-        total_correct += predicted.eq(adv_targets).sum().item()
         
         progress_bar.set_postfix({'L_cls': f'{loss_cls.item():.2f}', 'L_lip': f'{loss_lip.item():.2f}', 'L_margin': f'{loss_margin.item():.2f}', 'L_intra': f'{loss_intra_margin.item():.2f}'})
 
-    num_batches = len(loader)
-    avg_losses = {
-        'cls': running_loss_cls / num_batches,
-        'lip': running_loss_lip / num_batches,
-        'margin': running_loss_margin / num_batches,
-        'intra_margin': running_loss_intra_margin / num_batches
-    }
-    train_acc = 100. * total_correct / total
-    return train_acc, avg_losses
-
-def validate(model, loader, device, epoch, phase):
+def evaluate_on_train_set(model, loader, device, args, epoch, phase, max_batches=100):
+    """Evaluates clean and robust accuracy on a subset of the training data."""
     model.eval()
-    correct, total = 0, 0
-    with torch.no_grad():
-        for inputs, targets in loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-            mu = torch.tensor([0.4914, 0.4822, 0.4465]).view(3, 1, 1).to(device)
-            std = torch.tensor([0.2023, 0.1994, 0.2010]).view(3, 1, 1).to(device)
-            outputs = model((inputs - mu) / std)
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
-    acc = 100. * correct / total
-    print(f"Phase {phase} Epoch {epoch} Val Acc: {acc:.2f}%")
-    return acc
+    total_correct_clean, total_correct_robust, total_samples = 0, 0, 0
+    mu = torch.tensor([0.4914, 0.4822, 0.4465]).view(3, 1, 1).to(device)
+    std = torch.tensor([0.2023, 0.1994, 0.2010]).view(3, 1, 1).to(device)
+
+    # Use a fresh iterator on a subset of the loader for evaluation
+    data_iterator = iter(loader)
+    
+    progress_bar = tqdm(range(20), desc=f"Phase {phase} Epoch {epoch} Train Eval") # Changed max_batches to 20 for evaluation
+    for _ in progress_bar:
+        try:
+            inputs, targets = next(data_iterator)
+        except StopIteration:
+            break
+        
+        inputs, targets = inputs.to(device), targets.to(device)
+        
+        # 1. Clean Accuracy
+        with torch.no_grad():
+            outputs_clean = model((inputs - mu) / std)
+            _, predicted_clean = outputs_clean.max(1)
+            total_correct_clean += predicted_clean.eq(targets).sum().item()
+        
+        # 2. Robust Accuracy (via PGD attack)
+        adv_inputs = pgd_attack(model, inputs, targets, device, args.epsilon, args.alpha, args.attack_steps)
+        with torch.no_grad():
+            outputs_robust = model((adv_inputs - mu) / std)
+            _, predicted_robust = outputs_robust.max(1)
+            total_correct_robust += predicted_robust.eq(targets).sum().item()
+            
+        total_samples += targets.size(0)
+
+        if total_samples > 0:
+             progress_bar.set_postfix({
+                'Clean Acc': f'{100.*total_correct_clean/total_samples:.2f}%', 
+                'Robust Acc': f'{100.*total_correct_robust/total_samples:.2f}%'
+             })
+
+    clean_acc = 100. * total_correct_clean / total_samples
+    robust_acc = 100. * total_correct_robust / total_samples
+    
+    print(f"  Phase {phase} Epoch {epoch} Training Set -> Clean Acc: {clean_acc:.2f}%, Robust Acc: {robust_acc:.2f}%")
+    return clean_acc, robust_acc
 
 def analyze_phase1_geometry(model, loader, device, args):
     """Analyzes and prints key geometric properties of the latent space during Phase 1."""
@@ -442,13 +457,14 @@ def plot_training_metrics(history, phase, args):
     epsilon_str = f"{args.epsilon:.3f}".replace("0.", "p")
     filename_prefix = f"metrics_phase{phase}_L{args.lipschitz_constant}_eps{epsilon_str}_lip{args.lambda_lip}_margin{args.lambda_margin}"
     
-    epochs = range(1, len(history['val_acc']) + 1)
+    epochs = range(1, len(history['clean_train_acc']) + 1)
 
     # Plot 1: Accuracy
     plt.figure(figsize=(10, 6))
-    if 'train_acc' in history:
-        plt.plot(epochs, history['train_acc'], 'b-o', label='Training Accuracy')
-    plt.plot(epochs, history['val_acc'], 'r-o', label='Validation Accuracy')
+    if 'clean_train_acc' in history:
+        plt.plot(epochs, history['clean_train_acc'], 'b-o', label='Training Clean Accuracy')
+    if 'robust_train_acc' in history:
+        plt.plot(epochs, history['robust_train_acc'], 'r-o', label='Training Robust Accuracy')
     plt.title(f'Phase {phase} Accuracy')
     plt.xlabel('Epochs')
     plt.ylabel('Accuracy (%)')
@@ -534,9 +550,12 @@ def main():
     parser = argparse.ArgumentParser(description="Implementation of Option 2: Two-Stage Robust Training")
     # Phase 1 Args
     parser.add_argument('--epochs_phase1', type=int, default=40, help='Epochs for Phase 1')
+    
     parser.add_argument('--lambda_lip', type=float, default=0.01, help='Lambda for Lipschitz loss')
     parser.add_argument('--lambda_margin', type=float, default=0.01, help='Lambda for Margin loss')
+    
     parser.add_argument('--lambda_intra_margin', type=float, default=0.0, help='Lambda for Intra-Margin loss (DISABLED by default)')
+    
     parser.add_argument('--s_prime', type=int, default=2, help='Number of adversarial examples per clean example')
     # Phase 2 Args
     parser.add_argument('--epochs_phase2', type=int, default=20, help='Epochs for Phase 2')
@@ -564,19 +583,19 @@ def main():
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs_phase1)
     
-    history_phase1 = {'train_acc': [], 'val_acc': [], 'losses': {k: [] for k in ['cls', 'lip', 'margin', 'intra_margin']}, 'alpha': [], 'gamma': [], 'required_gamma': []}
+    history_phase1 = {'clean_train_acc': [], 'robust_train_acc': [], 'losses': {k: [] for k in ['cls', 'lip', 'margin', 'intra_margin']}, 'alpha': [], 'gamma': [], 'required_gamma': []}
 
     for epoch in range(1, args.epochs_phase1 + 1):
         args.epoch = epoch
-        train_acc, avg_losses = train_phase1(model, train_loader, optimizer, device, args)
-        val_acc = validate(model, test_loader, device, epoch, 1)
+        train_phase1(model, train_loader, optimizer, device, args)
+        clean_acc, robust_acc = evaluate_on_train_set(model, train_loader, device, args, epoch, 1)
         alpha_proxy, gamma_proxy, required_gamma = analyze_phase1_geometry(model, test_loader, device, args)
         scheduler.step()
 
         # Update history
-        history_phase1['train_acc'].append(train_acc)
-        history_phase1['val_acc'].append(val_acc)
-        for k in avg_losses: history_phase1['losses'][k].append(avg_losses[k])
+        history_phase1['clean_train_acc'].append(clean_acc)
+        history_phase1['robust_train_acc'].append(robust_acc)
+        # for k in avg_losses: history_phase1['losses'][k].append(avg_losses[k]) # avg_losses not returned anymore
         if alpha_proxy is not None:
             history_phase1['alpha'].append(alpha_proxy)
             history_phase1['gamma'].append(gamma_proxy)
@@ -632,15 +651,16 @@ def main():
 
     # 4. Phase 2 Training Loop
     val_features_by_class_cpu = {i: val_features[val_labels == i] for i in range(10)}
-    history_phase2 = {'val_acc': [], 'losses': {k: [] for k in ['kmeans', 'c_cls']}, 'alpha': [], 'gamma': [], 'two_alpha': []}
+    history_phase2 = {'clean_train_acc': [], 'robust_train_acc': [], 'losses': {k: [] for k in ['kmeans', 'c_cls']}, 'alpha': [], 'gamma': [], 'two_alpha': []}
     
     for epoch in range(1, args.epochs_phase2 + 1):
+        args.epoch = epoch # Update epoch for logging
         print(f"Phase 2 Epoch {epoch}/{args.epochs_phase2}")
         # Note: A full implementation would loop over the training data here.
         # We perform one step for demonstration and then track geometry.
         losses = train_phase2(model, centers, val_features_by_class_cpu, optimizer_p2, device, args)
         
-        val_acc = validate(model, test_loader, device, epoch, 2)
+        clean_acc, robust_acc = evaluate_on_train_set(model, train_loader, device, args, epoch, 2)
 
         # Live tracking of alpha and gamma on validation data
         with torch.no_grad():
@@ -649,7 +669,8 @@ def main():
         scheduler_p2.step()
         
         # Update history
-        history_phase2['val_acc'].append(val_acc)
+        history_phase2['clean_train_acc'].append(clean_acc)
+        history_phase2['robust_train_acc'].append(robust_acc)
         for k in losses: history_phase2['losses'][k].append(losses[k])
         history_phase2['alpha'].append(alpha.item())
         history_phase2['gamma'].append(gamma.item())
@@ -660,7 +681,6 @@ def main():
     print("--- Phase 2 Complete. ---")
     # Final analysis could be done here.
     print("\n--- Final Evaluation ---")
-    evaluate_robustness(model, test_loader, device, "Validation Set", args)
     evaluate_robustness(model, train_loader, device, "Training Set", args)
     
 
