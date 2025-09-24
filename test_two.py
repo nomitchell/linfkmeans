@@ -280,6 +280,14 @@ def train_phase1(model, loader, optimizer, device, args):
         
         progress_bar.set_postfix({'L_cls': f'{loss_cls.item():.2f}', 'L_lip': f'{loss_lip.item():.2f}', 'L_margin': f'{loss_margin.item():.2f}'})
 
+    num_batches = len(loader)
+    avg_losses = {
+        'cls': running_loss_cls / num_batches if num_batches > 0 else 0,
+        'lip': running_loss_lip / num_batches if num_batches > 0 else 0,
+        'margin': running_loss_margin / num_batches if num_batches > 0 else 0,
+    }
+    return avg_losses
+
 def evaluate_on_train_set(model, loader, device, args, epoch, phase, max_batches=100):
     """Evaluates clean and robust accuracy on a subset of the training data."""
     model.eval()
@@ -618,7 +626,7 @@ def main():
 
     for epoch in range(1, args.epochs_phase1 + 1):
         args.epoch = epoch
-        train_phase1(model, train_loader, optimizer, device, args)
+        avg_losses = train_phase1(model, train_loader, optimizer, device, args)
         clean_acc, robust_acc = evaluate_on_train_set(model, train_loader, device, args, epoch, 1)
         alpha_proxy, gamma_proxy, required_gamma = analyze_phase1_geometry(model, test_loader, device, args)
         scheduler.step()
@@ -626,7 +634,7 @@ def main():
         # Update history
         history_phase1['clean_train_acc'].append(clean_acc)
         history_phase1['robust_train_acc'].append(robust_acc)
-        # for k in avg_losses: history_phase1['losses'][k].append(avg_losses[k]) # avg_losses not returned anymore
+        for k in avg_losses: history_phase1['losses'][k].append(avg_losses[k])
         if alpha_proxy is not None:
             history_phase1['alpha'].append(alpha_proxy)
             history_phase1['gamma'].append(gamma_proxy)
